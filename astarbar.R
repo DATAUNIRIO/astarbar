@@ -3,6 +3,7 @@ library(mapview)
 library(tidyverse)
 library(sf)
 
+n_bars <- 7
 st_x = function(x) st_coordinates(x)[,1]
 st_y = function(x) st_coordinates(x)[,2]
 
@@ -43,9 +44,7 @@ end <- mespoints %>% filter(name == "end")
 list.of.samples <- replicate(1000, sample(1:100,size=10), simplify=FALSE)
 #initialiser les trajets
 open <- vector("list", 10000)
-#l <- list(replicate(1000,NA_character_))
-#l <- map(1:1000, ~ NULL)
-#l <- map(1:1000, ~ NA_character_)
+closed <- vector("list", 10000)
 open[[1]] <- "start"
 
 # get distance to data
@@ -60,6 +59,13 @@ d_left[1] = as.numeric(st_distance(end, points %>% filter(name== "start")))
 d_total <- c(rep(NA_integer_, 10000))
 d_total[1] = d_parcouru[1] + d_left[1]
 
+d_parcouru_closed <- c(rep(NA_integer_, 10000))
+
+# while we havent found the best path and there are still open paths..
+win  <- 0 
+round = 1
+while (win==0){
+message("round", round)
 # expand best trip
 k_to_expand <- which.min(d_total)
 open[k_to_expand]
@@ -68,7 +74,7 @@ last_point <- open[[k_to_expand]][length(open[[k_to_expand]])]
   
   
 # get list of possible destinations  (do not go back to already visited, and only go to end after 4 points including start)
-if(length(open[[k_to_expand]] )==4){
+if(length(open[[k_to_expand]] )== n_bars+1){
   dests <- "end"} else{
     dests <- points %>% filter(!(name %in% open[[k_to_expand]])) %>% pull(name)
   }
@@ -76,31 +82,57 @@ dests
 
 # find empty spots in list
 A = map_lgl(open, is.null) %>% which() %>% .[1:length(dests)]
+B = map_lgl(closed, is.null) %>% which() %>% .[1:length(dests)]
 i = 1 
 for (dest in dests){ 
+  if (dest != "end"){
   open[[A[i]]] <- c(open[[k_to_expand]], dest)
   d_parcouru[A[i]] <- d_parcouru[k_to_expand] + 
     as.numeric(st_distance(points %>% filter(name == last_point), 
                            points %>% filter(name == dest)))
   d_left[A[i]] <- as.numeric(st_distance(points %>% filter(name == dest), end))
   d_total[A[i]] <- d_parcouru[A[i]] + d_left[A[i]]
-  if(dest == "end" & d_total[A[i]] <= min(d_total) & d_total[A[i]] <= min(closed_d_total)){
-    win==1}
+  }
   
+  if (dest == "end"){
+    closed[[B[i]]] <- c(open[[k_to_expand]], dest)
+    d_parcouru_closed[B[i]] <- d_parcouru[k_to_expand] + 
+      as.numeric(st_distance(points %>% filter(name == last_point), 
+                             end))
+  if(d_parcouru_closed[B[i]] <= min(d_total, na.rm= T) & d_parcouru_closed[B[i]] <= min(d_parcouru_closed, na.rm = TRUE)){
+    win <- 1
+    message(paste0("final path = ", paste0(closed[[B[i]]]), " distance: ", d_parcouru_closed[B[i]]))}
+  }
   i <- i + 1
 }
 # effacer le k qu'on vient d'expand
-
+closed[1:20]
 
 #l[k_to_expand] <- NA_character_
 open[k_to_expand] <- list(NULL)
 d_parcouru[k_to_expand]<- NA_integer_
 d_left[k_to_expand] <-  NA_integer_
 d_total[k_to_expand] <-  NA_integer_
+round = round+1
+} # fin while
 
 
-open[1:20]
-d_parcouru[1:20]
-d_left[1:20]
-d_total[1:20]
+#open[1:20]
+#d_parcouru[1:20]
+#d_left[1:20]
+#d_total[1:20]
+best_path <- rbind(points %>% filter(name == "start"),
+      points %>% filter(name == "Bal du Lézard"),
+      points %>% filter(name == "L'autre Zone"),
+      points %>% filter(name == "Pub Light"),
+      end ) %>%
+  mutate(dummy=1) %>%
+  summarize(., do_union = FALSE) %>%
+  st_cast("LINESTRING")
 
+library(leaflet)
+leaflet(rbind(points,end))  %>%
+  addProviderTiles(providers$Esri.WorldTopoMap) %>%
+  addCircleMarkers() %>%
+  addPolylines(data=best_path, color="red")
+  
