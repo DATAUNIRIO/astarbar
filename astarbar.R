@@ -1,17 +1,21 @@
 
-remotes::install_github("GIScience/openrouteservice-r")
+#remotes::install_github("GIScience/openrouteservice-r")
+set.seed(1234)
 library(openrouteservice)
-#ors_api_key("apikey")
+ors_api_key(Sys.getenv("ors_key"))
 library(osmdata)
 library(mapview)
 library(tidyverse)
 library(sf)
 library(leaflet)
+library(htmlwidgets)
+library(htmltools)
+
 n_bars <- 3
 st_x = function(x) st_coordinates(x)[,1]
 st_y = function(x) st_coordinates(x)[,2]
 
-bbox <-  getbb('limoilou, québec')
+bbox <-  getbb('lévis, canada')
 
 mespoints <- tibble(name = c("start", "end"),
                     lat = c(bbox[2,1], bbox[2,2]),
@@ -39,11 +43,21 @@ pubs_bars <- pubs %>% rbind(bars)
 pubs_bars$x <- st_x(pubs_bars)
 pubs_bars$y <- st_y(pubs_bars)
 
+
+
+if(nrow(pubs_bars)> 49){
+  message("more than 50 pubs, sampling 49 to allow use of open route services duration matrix api")
+  pubs_bars <- pubs_bars[sample(nrow(pubs_bars), 49), ]
+}
+
+
 points <- pubs_bars %>% 
   filter(!is.na(name))%>%
   rbind(mespoints %>% filter(name == "start"))
 
 end <- mespoints %>% filter(name == "end")
+
+allpoints <- rbind(points, end)
 
 distance_matrix_input  <-  pubs_bars %>% 
   filter(!is.na(name))%>%
@@ -65,30 +79,34 @@ durations <- zz %>%
   gather(key= destination, value  = duration, -origin)
 
 
-list.of.samples <- replicate(1000, sample(1:100,size=10), simplify=FALSE)
+
 #initialiser les trajets
-open <- vector("list", 10000)
-closed <- vector("list", 10000)
+open <- vector("list", 100000)
+closed <- vector("list", 100000)
 open[[1]] <- "start"
 
 # get distance to data
-d_parcouru <- c(rep(NA_integer_, 10000))
+d_parcouru <- c(rep(NA_integer_, 100000))
 d_parcouru[1] <- 0
 
 #get distance to end
-d_left <- c(rep(NA_integer_, 10000))
-d_left[1] = as.numeric(st_distance(end, points %>% filter(name== "start")))
+d_left <- c(rep(NA_integer_, 100000))
+d_left[1] = durations %>% 
+  filter(origin == "start", destination == "end") %>% 
+  pull(duration) 
+  #as.numeric(st_distance(end, points %>% filter(name== "start")))
 
 # get total distance
-d_total <- c(rep(NA_integer_, 10000))
+d_total <- c(rep(NA_integer_, 100000))
 d_total[1] = d_parcouru[1] + d_left[1]
 
-d_parcouru_closed <- c(rep(NA_integer_, 10000))
+d_parcouru_closed <- c(rep(NA_integer_, 100000))
 
 # while we havent found the best path and there are still open paths..
-win  <- 0 
+win  <- 0
+stop <- 0
 round = 1
-while (win==0){
+while (win==0 & stop == 0){
   
   # expand best trip
   k_to_expand <- which.min(d_total)
@@ -102,9 +120,9 @@ while (win==0){
   # get list of possible destinations  (do not go back to already visited, and only go to end after 4 points including start)
   if(length(open[[k_to_expand]] )== n_bars+1){
     dests <- "end"} else{
-      dests <- points %>% filter(!(name %in% open[[k_to_expand]])) %>% pull(name)
+      dests <- points %>% filter(!(osm_id %in% open[[k_to_expand]])) %>% pull(osm_id)
     }
-  dests
+  #dests
   
   # find empty spots in list
   A = map_lgl(open, is.null) %>% which() %>% .[1:length(dests)]
@@ -114,17 +132,26 @@ while (win==0){
     if (dest != "end"){
       open[[A[i]]] <- c(open[[k_to_expand]], dest)
       d_parcouru[A[i]] <- d_parcouru[k_to_expand] + 
-        as.numeric(st_distance(points %>% filter(name == last_point), 
-                               points %>% filter(name == dest)))
-      d_left[A[i]] <- as.numeric(st_distance(points %>% filter(name == dest), end))
+        durations %>% 
+        filter(origin == last_point, destination == dest) %>% 
+        pull(duration)
+        # as.numeric(st_distance(points %>% filter(name == last_point), 
+        #                        points %>% filter(name == dest)))
+      d_left[A[i]] <- durations %>% 
+        filter(origin == dest, destination == "end") %>% 
+        pull(duration)
+        #as.numeric(st_distance(points %>% filter(name == dest), end))
       d_total[A[i]] <- d_parcouru[A[i]] + d_left[A[i]]
     }
     
     if (dest == "end"){
       closed[[B[i]]] <- c(open[[k_to_expand]], dest)
       d_parcouru_closed[B[i]] <- d_parcouru[k_to_expand] + 
-        as.numeric(st_distance(points %>% filter(name == last_point), 
-                               end))
+        durations %>% 
+        filter(origin == last_point, destination == "end") %>% 
+        pull(duration)
+        # as.numeric(st_distance(points %>% filter(name == last_point), 
+        #                        end))
       if(d_parcouru_closed[B[i]] <= min(d_total, na.rm= T) & d_parcouru_closed[B[i]] <= min(d_parcouru_closed, na.rm = TRUE)){
         win <- 1
         message(paste0("final path = ", paste0(closed[[B[i]]]), " distance: ", d_parcouru_closed[B[i]]))}
@@ -140,22 +167,90 @@ while (win==0){
   d_left[k_to_expand] <-  NA_integer_
   d_total[k_to_expand] <-  NA_integer_
   round = round+1
+  if (round == 500){
+    stop == 1
+    message("reached round 500, cancelling")
+  }
 } # fin while
 
-# create best_path
-best_path <- points %>% 
-  left_join (tibble(name = closed[[1]]) %>% 
-               mutate(rank = row_number())) %>%
-  arrange(rank) %>%
-  filter(!is.na(rank)) %>%
-  select(name) %>%
-  rbind(end %>% select(name)) %>%
-  mutate(dummy=1) %>%
-  summarize(., do_union = FALSE) %>%
-  st_cast("LINESTRING")
+# create best_path as the crow flies
+# best_path_linestring <- rbind(points,end) %>% 
+#   left_join (tibble(osm_id = closed[[1]]) %>% 
+#                mutate(rank = row_number())) %>%
+#   arrange(rank) %>%
+#   filter(!is.na(rank)) %>%
+#   select(osm_id) %>%
+#   summarize(., do_union = FALSE) %>%
+#   st_cast("LINESTRING")
 
-leaflet(rbind(points,end))  %>%
+# create markers by use
+
+markers <- allpoints %>% 
+  left_join(tibble(osm_id = closed[[1]]) %>% 
+              mutate(rank = row_number())) %>%
+  mutate(type =factor(
+    case_when(
+      osm_id == "start"~ "start",
+      osm_id == "end"~ "end",
+      !is.na(rank) ~ "beer",
+      TRUE ~ "nobeer")))
+
+IconSet <- awesomeIconList(
+  beer   = makeAwesomeIcon(icon= 'beer', markerColor = 'green', iconColor = 'white', library = "fa"),
+  nobeer = makeAwesomeIcon(icon= 'beer', markerColor = 'red', iconColor = 'white', library = "fa"),
+  start = makeAwesomeIcon(icon= 'flag-o ',  iconColor = 'white', library = "fa"),
+  end = makeAwesomeIcon(icon= 'bed',  iconColor = 'white', library = "fa")
+  
+)
+
+
+best_path_stops <-  markers %>%
+  filter(!is.na(rank))%>%
+  arrange(rank) %>%
+  select(osm_id,x,y) %>%
+  rbind(end %>% select(osm_id,x,y))  %>%
+  st_set_geometry(NULL)
+
+
+x <- ors_directions(best_path_stops %>% select(x,y),
+                    profile= "foot-walking")
+
+
+
+
+tag.map.title <- tags$style(HTML("
+  .leaflet-control.map-title { 
+    transform: translate(-50%,20%);
+    position: fixed !important;
+    left: 50%;
+    text-align: center;
+    padding-left: 10px; 
+    padding-right: 10px; 
+    background: rgba(255,255,255,0.75);
+    font-weight: bold;
+    font-size: 28px;
+  }
+"))
+
+
+beer <- markers %>%
+  filter(osm_id != "start", osm_id != "end") %>%
+  filter(!is.na(rank))%>%
+  arrange(rank)  
+
+title <- tags$div(
+  tag.map.title, HTML("The shortest path home with ",
+                      n_bars, 
+                      " bars stops at ", 
+                      paste0(beer$name, collapse = "", sep= ", "), 
+                      " and will require crawling ",
+                      floor(d_parcouru_closed[1] / 60),
+                      " minutes.")
+)  
+
+leaflet(markers)  %>%
   addProviderTiles(providers$Esri.WorldTopoMap) %>%
-  addCircleMarkers(popup = ~ name ) %>%
-  addPolylines(data=best_path, color="red")
+  addAwesomeMarkers(icon = ~IconSet[type], popup =~ name) %>%
+  addGeoJSON(x, fill=FALSE, color = "red")%>%
+  addControl(title, position = "topleft")
 
